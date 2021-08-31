@@ -57,9 +57,9 @@ public class ConnectorConfig extends AbstractConfig {
             .define(
                 ConnectorConfigKeys.SCHEMA_USE_LONG_FOR_INTS.getValue(),
                 ConfigDef.Type.BOOLEAN,
-                false,
+                true,
                 ConfigDef.Importance.HIGH,
-                "Treat integers in the input JSON as longs. Default is false.");
+                "Treat integers in the input JSON as longs. Default is true.");
 
     @Getter
     private final int maxMessages;
