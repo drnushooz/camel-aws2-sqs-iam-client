@@ -21,7 +21,7 @@
 
     <groupId>com.github.drnushooz</groupId>
     <artifactId>sqs-kafka-connector</artifactId>
-    <version>0.0.2-SNAPSHOT</version>
+    <version>0.0.3-SNAPSHOT</version>
 
     <properties>
         <maven.compiler.source>11</maven.compiler.source>
@@ -29,9 +29,9 @@
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <apicurio-registry-utils.version>2.1.0.RC1</apicurio-registry-utils.version>
+        <apicurio-registry-utils.version>2.1.0.Final</apicurio-registry-utils.version>
         <aws.sdk.version>2.17.24</aws.sdk.version>
-        <diakon.version>5.10.0</diakon.version>
+        <diakon.version>5.13.0</diakon.version>
         <jackson.version>2.12.4</jackson.version>
         <json-schema-inferrer.version>0.1.4</json-schema-inferrer.version>
         <junit.version>5.7.2</junit.version>
