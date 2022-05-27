@@ -27,18 +27,15 @@ import java.util.Map;
 import java.util.Optional;
 import lombok.Getter;
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 
+@Slf4j
 public class SqsSinkTask extends SinkTask {
-
-    private final Logger logger = LoggerFactory.getLogger(this.getClass().getCanonicalName());
-
     private SqsClient client;
     private ConnectorConfig connectorConfig;
 
@@ -59,11 +56,13 @@ public class SqsSinkTask extends SinkTask {
         combinedProperties = new HashMap<>(connectorConfig.originalsStrings());
         combinedProperties.putAll(props);
         combinedProperties
-            .put(ConnectorConfigKeys.SQS_CREDENTIALS_USE_DEFAULT_PROVIDER.getValue(), connectorConfig.isCredentialsUseDefaultProvider());
+            .put(ConnectorConfigKeys.SQS_CREDENTIALS_USE_DEFAULT_PROVIDER.getValue(),
+                connectorConfig.isCredentialsUseDefaultProvider());
         client = SqsClientFactory.getClient(combinedProperties);
         queueUrl = connectorConfig.getQueueUrl();
-        logger.info(
-            "Sink task started for queue URL: {} and topic: {}", queueUrl, connectorConfig.getTopic());
+        log.info(
+            "Sink task started for queue URL: {} and topic: {}", queueUrl,
+            connectorConfig.getTopic());
     }
 
     @Override
@@ -76,55 +75,51 @@ public class SqsSinkTask extends SinkTask {
             throw new IllegalStateException("Task is not properly initialized");
         }
 
-        if (logger.isDebugEnabled()) {
-            logger.debug("Put record count: {}", records.size());
-        }
+        log.debug("Put record count: {}", records.size());
 
-        records.forEach(
-            record -> {
-                final String messageId =
-                    MessageFormat.format(
-                        "{0}-{1}-{2}",
-                        record.topic(), record.kafkaPartition().longValue(), record.kafkaOffset());
-                final String recordKey =
-                    Optional.ofNullable(record.key()).map(Object::toString).orElse(null);
-                final String recordTopic =
-                    Optional.ofNullable(recordKey).filter(String::isEmpty).orElse(record.topic());
-                final String recordValue =
-                    Optional.ofNullable(record.value()).map(Object::toString).orElse("");
-
-                if (recordValue.isEmpty()) {
-                    logger.warn("Skipping empty message with record key: {}", recordKey);
-                } else {
-                    try {
-                        final SendMessageRequest request =
-                            SendMessageRequest.builder()
-                                .queueUrl(queueUrl)
-                                .messageBody(recordValue)
-                                .messageGroupId(recordTopic)
-                                .messageDeduplicationId(messageId)
-                                .build();
-                        SendMessageResponse response = client.sendMessage(request);
-                        logger.debug(
-                            "Sent message ID: {} queue URL: {} SQS group ID: {} SQS message ID: {}",
-                            recordTopic,
-                            messageId,
-                            queueUrl,
-                            response.messageId());
-                    } catch (final RuntimeException e) {
-                        logger.error(
-                            "An Exception occurred while sending message ID: {} to target URL: {}",
-                            messageId,
-                            queueUrl,
-                            e);
-                    }
+        records.parallelStream().forEachOrdered(record -> {
+            final String messageId =
+                MessageFormat.format(
+                    "{0}-{1}-{2}",
+                    record.topic(), record.kafkaPartition().longValue(), record.kafkaOffset());
+            final String recordKey =
+                Optional.ofNullable(record.key()).map(Object::toString).orElse(null);
+            final String recordTopic =
+                Optional.ofNullable(recordKey).filter(String::isEmpty).orElse(record.topic());
+            final String recordValue =
+                Optional.ofNullable(record.value()).map(Object::toString).orElse("");
+            if (recordValue.isEmpty()) {
+                log.warn("Skipping empty message with record key: {}", recordKey);
+            } else {
+                try {
+                    final SendMessageRequest request =
+                        SendMessageRequest.builder()
+                            .queueUrl(queueUrl)
+                            .messageBody(recordValue)
+                            .messageGroupId(recordTopic)
+                            .messageDeduplicationId(messageId)
+                            .build();
+                    SendMessageResponse response = client.sendMessage(request);
+                    log.debug(
+                        "Sent message ID: {} queue URL: {} SQS group ID: {} SQS message ID: {}",
+                        recordTopic,
+                        messageId,
+                        queueUrl,
+                        response.messageId());
+                } catch (final RuntimeException e) {
+                    log.error(
+                        "An Exception occurred while sending message ID: {} to target URL: {}",
+                        messageId,
+                        queueUrl,
+                        e);
                 }
-            });
+            }
+        });
     }
 
     @Override
     public void stop() {
-        logger.info("Sink task stopped");
+        log.info("Sink task stopped");
     }
 
     private boolean isValidState() {
