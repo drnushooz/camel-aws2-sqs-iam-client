@@ -28,17 +28,17 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.talend.daikon.avro.converter.JsonGenericRecordConverter;
 import org.talend.daikon.avro.inferrer.JsonSchemaInferrer;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -47,10 +47,8 @@ import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
+@Slf4j
 public class SqsSourceTask extends SourceTask {
-
-    private final Logger logger = LoggerFactory.getLogger(this.getClass().getCanonicalName());
-
     private SqsClient client;
     private ConnectorConfig connectorConfig;
 
@@ -77,61 +75,67 @@ public class SqsSourceTask extends SourceTask {
         combinedProperties = new HashMap<>(connectorConfig.originalsStrings());
         combinedProperties.putAll(props);
         combinedProperties
-            .put(ConnectorConfigKeys.SQS_CREDENTIALS_USE_DEFAULT_PROVIDER.getValue(), connectorConfig.isCredentialsUseDefaultProvider());
+            .put(ConnectorConfigKeys.SQS_CREDENTIALS_USE_DEFAULT_PROVIDER.getValue(),
+                connectorConfig.isCredentialsUseDefaultProvider());
         client = SqsClientFactory.getClient(combinedProperties);
         queueUrl = connectorConfig.getQueueUrl();
         maxMessages = connectorConfig.getMaxMessages();
         waitTimeSeconds = connectorConfig.getWaitTimeSeconds();
         topic = connectorConfig.getTopic();
         schemaInferrer = new JsonSchemaInferrer(
-            new ObjectMapper().configure(DeserializationFeature.USE_LONG_FOR_INTS, connectorConfig.isUseLongForInts()));
+            new ObjectMapper().configure(DeserializationFeature.USE_LONG_FOR_INTS,
+                connectorConfig.isUseLongForInts()));
         avroData = new AvroData(new AvroDataConfig(props));
-        logger.info("Source task started for queue URL: {} and topic: {}", queueUrl, topic);
+        log.info("Source task started for queue URL: {} and topic: {}", queueUrl, topic);
         if (connectorConfig.isUseLongForInts()) {
-            logger.info("Using long to represent int in incoming JSON");
+            log.info("Using long to represent int in incoming JSON");
         }
     }
 
     @Override
-    public List<SourceRecord> poll() throws InterruptedException {
+    public List<SourceRecord> poll() {
         if (!isValidState()) {
             throw new IllegalStateException("Task is not properly initialized");
         }
 
-        ReceiveMessageRequest request =
-            ReceiveMessageRequest.builder()
-                .queueUrl(queueUrl)
-                .maxNumberOfMessages(maxMessages)
-                .waitTimeSeconds(waitTimeSeconds)
-                .build();
-        ReceiveMessageResponse response = client.receiveMessage(request);
-        List<Message> messages = response.messages();
+        CompletableFuture<List<Message>> messagesFut = CompletableFuture.supplyAsync(() -> {
+            ReceiveMessageRequest request =
+                ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(maxMessages)
+                    .waitTimeSeconds(waitTimeSeconds)
+                    .build();
+            ReceiveMessageResponse response = client.receiveMessage(request);
+            List<Message> messages = response.messages();
 
-        if (logger.isDebugEnabled()) {
-            logger.debug(
+            log.debug(
                 "Polling queue URL: {} max messages: {} max wait: {} size: {}",
                 queueUrl,
                 maxMessages,
                 waitTimeSeconds,
                 messages.size());
-        }
 
-        return messages.stream()
-            .map(
-                message -> {
+            return messages;
+        });
+
+        CompletableFuture<List<SourceRecord>> recordsFut =
+            messagesFut.thenCompose((List<Message> messages) -> {
+                List<SourceRecord> records = messages.parallelStream().map(message -> {
                     Map<String, String> sourcePartition =
-                        Collections.singletonMap(ConnectorConfigKeys.SQS_QUEUE_URL.getValue(), queueUrl);
+                        Collections.singletonMap(ConnectorConfigKeys.SQS_QUEUE_URL.getValue(),
+                            queueUrl);
                     Map<String, String> sourceOffset = new HashMap<>();
 
                     // Message ID and receipt-handle are used to delete a message once a is committed
-                    sourceOffset.put(ConnectorConfigKeys.SQS_MESSAGE_ID.getValue(), message.messageId());
+                    sourceOffset.put(ConnectorConfigKeys.SQS_MESSAGE_ID.getValue(),
+                        message.messageId());
                     sourceOffset.put(
                         ConnectorConfigKeys.SQS_MESSAGE_RECEIPT_HANDLE.getValue(),
                         message.receiptHandle());
 
-                    if (logger.isTraceEnabled()) {
-                        logger.trace("Poll source-partition: {}", sourcePartition);
-                        logger.trace("Poll source-offset: {}", sourceOffset);
+                    if (log.isTraceEnabled()) {
+                        log.trace("Poll source-partition: {}", sourcePartition);
+                        log.trace("Poll source-offset: {}", sourceOffset);
                     }
 
                     // Generate the output record
@@ -141,7 +145,8 @@ public class SqsSourceTask extends SourceTask {
                     JsonGenericRecordConverter recordConverter =
                         new JsonGenericRecordConverter(messageValueAvroSchema);
                     GenericRecord outputRecord = recordConverter.convertToAvro(messageValue);
-                    SchemaAndValue connectSchemaAndData = avroData.toConnectData(messageValueAvroSchema, outputRecord);
+                    SchemaAndValue connectSchemaAndData =
+                        avroData.toConnectData(messageValueAvroSchema, outputRecord);
 
                     return new SourceRecord(
                         sourcePartition,
@@ -151,24 +156,30 @@ public class SqsSourceTask extends SourceTask {
                         messageKey,
                         connectSchemaAndData.schema(),
                         connectSchemaAndData.value());
-                })
-            .collect(Collectors.toList());
+                }).collect(Collectors.toList());
+
+                return CompletableFuture.completedFuture(records);
+            });
+
+        return recordsFut.join();
     }
 
     @Override
-    public void commitRecord(SourceRecord record, RecordMetadata metadata) throws InterruptedException {
-        final String receiptHandle = record.sourceOffset().get(ConnectorConfigKeys.SQS_MESSAGE_RECEIPT_HANDLE.getValue()).toString();
-        DeleteMessageRequest request = DeleteMessageRequest.builder().queueUrl(queueUrl).receiptHandle(receiptHandle).build();
+    public void commitRecord(SourceRecord record, RecordMetadata metadata)
+        throws InterruptedException {
+        final String receiptHandle =
+            record.sourceOffset().get(ConnectorConfigKeys.SQS_MESSAGE_RECEIPT_HANDLE.getValue())
+                .toString();
+        DeleteMessageRequest request =
+            DeleteMessageRequest.builder().queueUrl(queueUrl).receiptHandle(receiptHandle).build();
         client.deleteMessage(request);
-        if (logger.isDebugEnabled()) {
-            logger.debug("Deleted message with handle: {}", receiptHandle);
-        }
+        log.debug("Deleted message with handle: {}", receiptHandle);
         super.commitRecord(record, metadata);
     }
 
     @Override
     public void stop() {
-        logger.info("Source task stopped");
+        log.info("Source task stopped");
     }
 
     private boolean isValidState() {
